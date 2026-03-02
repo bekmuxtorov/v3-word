@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="uz">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>V3 Word Integratsiya Namunasi</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #334155;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Top Bar */
+        header {
+            height: 64px;
+            background-color: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            z-index: 100;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: var(--text);
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        button {
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: none;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 14px;
+        }
+
+        .btn-primary {
+            background-color: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: var(--primary-hover);
+            transform: translateY(-1px);
+        }
+
+        /* Editor Container */
+        .editor-wrapper {
+            flex: 1;
+            position: relative;
+            background-color: #111827;
+        }
+
+        iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+
+        /* Loading Overlay */
+        #loadingOverlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(15, 23, 42, 0.9);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 200;
+            transition: opacity 0.3s;
+        }
+
+        .hidden {
+            display: none !important;
+            opacity: 0;
+        }
+
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 4px solid rgba(37, 99, 235, 0.1);
+            border-left-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 16px;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .loading-text {
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        /* Status Toast */
+        #infoMessage {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background-color: #10b981;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateY(20px);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="editor-wrapper">
+        <div id="loadingOverlay">
+            <div class="spinner"></div>
+            <div class="loading-text">Editor tayyorlanmoqda...</div>
+        </div>
+        <!-- Ilova manzili (localhost:5173 yoki production URL) -->
+        <iframe id="editorIframe" src="http://localhost:5173"></iframe>
+    </div>
+
+    <div id="infoMessage" class="hidden"></div>
+
+    <script>
+        const iframe = document.getElementById('editorIframe');
+        const overlay = document.getElementById('loadingOverlay');
+        const loadingText = overlay.querySelector('.loading-text');
+        const info = document.getElementById('infoMessage');
+
+        let isEditorReady = false;
+        let isDocumentLoaded = false;
+
+        // 1. Dasturdan (Child) kelayotgan xabarlarni tinglash
+        window.addEventListener('message', function (event) {
+            // Faqat o'zimizga tegishli xabarlarni log qilish
+            if (event.data && typeof event.data === 'object' && 'status' in event.data) {
+                console.log('📨 V3 Message received:', event.data);
+
+                const { status, url } = event.data;
+
+                // Editor yuklandi va ma'lumot kutmoqda
+                if (status === 'ready') {
+                    console.log('✅ Editor "ready" holatida.');
+                    isEditorReady = true;
+
+                    // Agar hali hujjat yuklanmagan bo'lsa, avtomatik yuklashni boshlash
+                    if (!isDocumentLoaded) {
+                        loadDocument();
+                    }
+                }
+
+                // Hujjat to'liq render bo'ldi
+                if (status === 'loaded') {
+                    console.log('✅ Hujjat yuklandi:', url);
+                    isDocumentLoaded = true;
+                    overlay.classList.add('hidden');
+                    showToast('Hujjat muvaffaqiyatli yuklandi!');
+                }
+            } else {
+                // Extensionlar (Wappalyzer va b.) yuborayotgan xabarlarni e'tiborsiz qoldiramiz
+            }
+        });
+
+        // 2. Hujjatni yuklash funktsiyasi
+        function loadDocument() {
+            if (!isEditorReady) {
+                console.log('⚠️ Editor hali tayyor emas.');
+                return;
+            }
+
+            console.log('📤 Sending config to editor...');
+            overlay.classList.remove('hidden');
+            loadingText.textContent = 'Hujjat tayyorlanmoqda...';
+
+            const config = {
+                input_url: 'https://storage.ekomplektasiya.uz/ekompletasiya/Document/BuyurtmaWord/2026/3/2/20260302050602.docx?AWSAccessKeyId=minioadmin&Signature=Yvk4%2FPpB94k58hHbo6OizQxDM%2Bw%3D&Expires=1772478268',
+                v3_ganiwer: 'sample-token-123',
+            };
+
+            iframe.contentWindow.postMessage(config, '*');
+        }
+
+        function showToast(msg) {
+            info.textContent = msg;
+            info.classList.remove('hidden');
+            setTimeout(() => info.classList.add('hidden'), 4000);
+        }
+    </script>
+</body>
+
+</html>
