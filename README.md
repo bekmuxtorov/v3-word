@@ -1,4 +1,68 @@
-# v3-word
+# v3-word (O'zbek tili)
+
+React va HTML5 Canvas yordamida yaratilgan, yuqori tezlik va aniqlikka ega DOCX ko'ruvchi (viewer). Ushbu loyiha murakkab Word hujjatlarini, jumladan jadvallarni, rasmlarni va ichma-ich joylashgan elementlarni piksel darajasidagi aniqlik bilan render qilish uchun mo'ljallangan.
+
+## 🚀 Asosiy Imkoniyatlar
+
+- **Yuqori Aniqlikdagi Jadvallar**: Murakkab jadval panjaralari (grid), ichma-ich jadvallar, vertikal tekislash va maxsus chegaralarni (borders) qo'llab-quvvatlaydi.
+- **Piksel darajasidagi Aniqlik**: Microsoft Word layout fizikasini, jumladan ustunlarni proporsional kengaytirish va hujayralardagi maxsus paddinglarni aniq takrorlaydi.
+- **Rekursiv Tahlil (Parsing)**: Ichma-ich joylashgan kontent-kontrollar (SDT), smart-teglar va qo'shimchalarni qayta ishlovchi mustahkam `DocxParser`.
+- **Murakkab Layout Engine**:
+  - Sahifalarga ajratish va avtomatik page-break.
+  - Rasmlarni to'g'ri aspect ratio va o'lcham bilan joylashtirish.
+  - Matnlarni o'rash va tekislash (chap, markaz, o'ng, justified).
+  - Indentatsiya va tab-stoplarni qo'llab-quvvatlash.
+- **Iframe Integratsiyasi**: `postMessage` API orqali boshqa platformalarga integratsiya qilishga tayyor.
+- **PDF Eksport**: Render qilingan hujjatni PDF formatiga eksport qilish imkoniyati.
+
+## 🛠️ O'rnatish
+
+### Talablar
+- Node.js (v18 yoki undan yuqori)
+- npm yoki yarn
+
+### Sozlash
+1. Repository-ni klon qiling:
+   ```bash
+   git clone https://github.com/bekmuxtorov/v3-word.git
+   cd v3-word
+   ```
+
+2. Kutubxonalarni o'rnating:
+   ```bash
+   npm install
+   ```
+
+3. Lokal serverni ishga tushiring:
+   ```bash
+   npm run dev
+   ```
+
+## 📖 Foydalanish Qo'llanmasi
+
+### Iframe orqali integratsiya qilish
+Hujjat ko'ruvchini iframe yordamida o'z saytingizga joylashingiz mumkin. Viewer `postMessage` API orqali `input_url` ni qabul qiladi.
+
+```html
+<iframe src="https://sizning-domen.uz/use.html" id="docx-viewer"></iframe>
+
+<script>
+  const viewer = document.getElementById('docx-viewer');
+  
+  // Hujjat URL-ini viewer-ga yuborish
+  viewer.contentWindow.postMessage({
+    type: 'INIT_DOCX',
+    config: {
+      input_url: 'https://storage.example.com/document.docx',
+      token: 'your-auth-token'
+    }
+  }, '*');
+</script>
+```
+
+---
+
+# v3-word (English)
 
 A high-performance, high-fidelity DOCX viewer built with React and HTML5 Canvas. This project is specifically designed to render complex Word documents, including advanced tables, images, and nested structures, with pixel-perfect accuracy.
 
@@ -59,17 +123,3 @@ You can embed the viewer in your web application using an iframe. The viewer lis
   }, '*');
 </script>
 ```
-
-### Core Architecture
-
-- **`DocxParser.ts`**: Converts raw OpenXML (DOCX) into a clean JSON `DocumentNode` tree. Handles relationships, images, and styles.
-- **`LayoutEngine.ts`**: The "brain" of the viewer. It performs two passes:
-  1. **Measurement Pass**: Calculates the height of text, tables, and rows.
-  2. **Render Pass**: Positions items on specific pages, handles pagination, and vertical alignment offset.
-- **`Renderer.ts`**: Draws the `LayoutModel` onto an HTML5 Canvas for crystal-clear text rendering.
-
-## 🤝 Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📄 License
-This project is licensed under the MIT License.
