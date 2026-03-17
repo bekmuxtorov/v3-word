@@ -109,6 +109,7 @@ export interface DocumentNode {
     rotation?: number; // in degrees
     zIndex?: number;
     style?: any;
+    sectPr?: PageSettings; // Section properties (page size, orientation, margins)
 }
 
 export type RenderItem = {

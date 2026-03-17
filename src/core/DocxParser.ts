@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import type { DocumentNode, TextRun, Alignment, PageSettings, ParagraphProperties, TabStop, DocumentDefaults } from './types';
+import type { DocumentNode, TextRun, Alignment, PageSettings, ParagraphProperties, TabStop, DocumentDefaults, TableRow, TableCell } from './types';
 
 // Twips to Pixels conversion factor (1440 twips = 1 inch = 96 pixels)
 const TWIP_TO_PX = 96 / 1440;
@@ -75,39 +75,83 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
     const xmlContent = await documentXmlFile.async('text');
     const xmlDoc = new DOMParser().parseFromString(xmlContent, 'text/xml');
 
-    // 3a. Extract Section Properties (Page Size, Margins)
-    const sectPrs = byTag(xmlDoc, 'w:sectPr');
-    let pageSettings: PageSettings = {
-        width: 816, // Default A4 approx
-        height: 1056,
-        margins: { top: 96, bottom: 96, left: 96, right: 96 }
-    };
+    const extractPageSettings = (sectPr: Element): PageSettings => {
+        const settings: PageSettings = {
+            width: 816, // Default A4 approx
+            height: 1056,
+            margins: { top: 96, bottom: 96, left: 96, right: 96 }
+        };
 
-    if (sectPrs.length > 0) {
-        const sectPr = sectPrs[sectPrs.length - 1]; // Use the last one for global settings
         const pgSz = byTag(sectPr, 'w:pgSz')[0];
         if (pgSz) {
             const w = Number(pgSz.getAttribute('w:w')) || 0;
             const h = Number(pgSz.getAttribute('w:h')) || 0;
-            if (w) pageSettings.width = w * TWIP_TO_PX;
-            if (h) pageSettings.height = h * TWIP_TO_PX;
+            if (w) settings.width = w * TWIP_TO_PX;
+            if (h) settings.height = h * TWIP_TO_PX;
         }
+
         const pgMar = byTag(sectPr, 'w:pgMar')[0];
         if (pgMar) {
             const t = Number(pgMar.getAttribute('w:top')) || 0;
             const b = Number(pgMar.getAttribute('w:bottom')) || 0;
             const l = Number(pgMar.getAttribute('w:left')) || 0;
             const r = Number(pgMar.getAttribute('w:right')) || 0;
-            pageSettings.margins = {
+            settings.margins = {
                 top: t * TWIP_TO_PX,
                 bottom: b * TWIP_TO_PX,
                 left: l * TWIP_TO_PX,
                 right: r * TWIP_TO_PX
             };
         }
+        return settings;
+    };
+
+    // 3a. Extract all sections in order
+    const allSectPrs: PageSettings[] = [];
+    const body = byTag(xmlDoc, 'w:body')[0];
+    if (body) {
+        // Collect sectPr ONLY from direct children of w:body (paragraphs)
+        for (const child of Array.from(body.children)) {
+            const nodeName = child.localName || child.nodeName.split(':').pop();
+            if (nodeName === 'p') {
+                const pPr = directByTag(child, 'w:pPr')[0];
+                if (pPr) {
+                    const sectPrNode = directByTag(pPr, 'w:sectPr')[0];
+                    if (sectPrNode) {
+                        allSectPrs.push(extractPageSettings(sectPrNode));
+                    }
+                }
+            }
+        }
+        // Then the body sectPr (properties of the last section)
+        const bodySectPr = directByTag(body, 'w:sectPr')[0];
+        if (bodySectPr) {
+            allSectPrs.push(extractPageSettings(bodySectPr));
+        }
     }
 
+    const defaultPageSettings: PageSettings = allSectPrs.length > 0
+        ? allSectPrs[0]
+        : {
+            width: 816,
+            height: 1056,
+            margins: { top: 96, bottom: 96, left: 96, right: 96 }
+        };
+
     const nodes: DocumentNode[] = [];
+    let currentSectionIdx = 0;
+
+    const getCurrentSectionSettings = () => {
+        if (allSectPrs.length === 0) return defaultPageSettings;
+        const idx = Math.min(currentSectionIdx, allSectPrs.length - 1);
+        // ALWAYS return a fresh copy to prevent shared state issues
+        const s = allSectPrs[idx];
+        return {
+            ...s,
+            margins: { ...s.margins }
+        };
+    };
+
 
     // Base64 image helper
     const getBase64Image = async (targetPath: string): Promise<{ src: string; natW: number; natH: number } | null> => {
@@ -132,6 +176,84 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
             img.onerror = () => resolve({ src: b64url, natW: 300, natH: 300 });
             img.src = b64url;
         });
+    };
+
+    // Process image helper
+    const processImageWrapper = async (wrapper: Element, rEmbed: string, baseAlign: Alignment, outNodes: DocumentNode[]) => {
+        let width = 300, height = 300;
+        const extents = byTag(wrapper, 'wp:extent');
+        if (extents.length > 0) {
+            const cx = Number(extents[0].getAttribute('cx')) || 0;
+            const cy = Number(extents[0].getAttribute('cy')) || 0;
+            if (cx > 0) width = cx / 9525;
+            if (cy > 0) height = cy / 9525;
+        }
+
+        const absPos: any = {};
+        let imageAlign: Alignment = baseAlign;
+
+        // Extract Wrapping
+        let wrapType: any = 'inline';
+        if (byTag(wrapper, 'wp:wrapSquare').length > 0) wrapType = 'square';
+        else if (byTag(wrapper, 'wp:wrapTopAndBottom').length > 0) wrapType = 'topAndBottom';
+        else if (byTag(wrapper, 'wp:wrapTight').length > 0) wrapType = 'tight';
+        else if (byTag(wrapper, 'wp:wrapThrough').length > 0) wrapType = 'through';
+        else if (byTag(wrapper, 'wp:wrapNone').length > 0) wrapType = 'none';
+
+        // Extract Rotation and Z-Index
+        let rotation = 0;
+        const xfrm = byTag(wrapper, 'a:xfrm')[0];
+        if (xfrm) {
+            const rot = Number(xfrm.getAttribute('rot')) || 0;
+            // OOXML rotation is in 60,000ths of a degree, clockwise
+            rotation = rot / 60000;
+        }
+
+        const zIndex = Number(wrapper.getAttribute('relativeHeight')) || 0;
+
+        // Extract Position (Anchored)
+        const posH = byTag(wrapper, 'wp:positionH')[0];
+        if (posH) {
+            absPos.relH = posH.getAttribute('relativeFrom');
+            const align = byTag(posH, 'wp:align')[0]?.textContent;
+            if (align) {
+                absPos.alignH = align;
+                if (align === 'center') imageAlign = 'center';
+                else if (align === 'right') imageAlign = 'right';
+                else if (align === 'left') imageAlign = 'left';
+            }
+            const offset = byTag(posH, 'wp:posOffset')[0]?.textContent;
+            if (offset) absPos.x = Number(offset) / 9525;
+        }
+
+        const posV = byTag(wrapper, 'wp:positionV')[0];
+        if (posV) {
+            absPos.relV = posV.getAttribute('relativeFrom');
+            const align = byTag(posV, 'wp:align')[0]?.textContent;
+            if (align) absPos.alignV = align;
+            const offset = byTag(posV, 'wp:posOffset')[0]?.textContent;
+            if (offset) absPos.y = Number(offset) / 9525;
+        }
+
+        const targetPath = relationships[rEmbed];
+        if (!targetPath) return;
+        const base64Src = await getBase64Image(targetPath);
+        if (base64Src) {
+            outNodes.push({
+                type: 'image',
+                src: base64Src.src,
+                width,
+                height,
+                nativeWidth: base64Src.natW,
+                nativeHeight: base64Src.natH,
+                align: imageAlign,
+                absolutePos: Object.keys(absPos).length > 0 ? absPos : undefined,
+                wrapType,
+                rotation,
+                zIndex,
+                sectPr: getCurrentSectionSettings()
+            });
+        }
     };
 
     // Extract paragraph properties <w:pPr>
@@ -254,99 +376,28 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
         return props;
     };
 
-    // Process image helper
-    const processImageWrapper = async (wrapper: Element, rEmbed: string, baseAlign: Alignment, outNodes: DocumentNode[]) => {
-        let width = 300, height = 300;
-        const extents = byTag(wrapper, 'wp:extent');
-        if (extents.length > 0) {
-            const cx = Number(extents[0].getAttribute('cx')) || 0;
-            const cy = Number(extents[0].getAttribute('cy')) || 0;
-            if (cx > 0) width = cx / 9525;
-            if (cy > 0) height = cy / 9525;
-        }
-
-        const absPos: any = {};
-        let imageAlign: Alignment = baseAlign;
-
-        // Extract Wrapping
-        let wrapType: any = 'inline';
-        if (byTag(wrapper, 'wp:wrapSquare').length > 0) wrapType = 'square';
-        else if (byTag(wrapper, 'wp:wrapTopAndBottom').length > 0) wrapType = 'topAndBottom';
-        else if (byTag(wrapper, 'wp:wrapTight').length > 0) wrapType = 'tight';
-        else if (byTag(wrapper, 'wp:wrapThrough').length > 0) wrapType = 'through';
-        else if (byTag(wrapper, 'wp:wrapNone').length > 0) wrapType = 'none';
-
-        // Extract Rotation and Z-Index
-        let rotation = 0;
-        const xfrm = byTag(wrapper, 'a:xfrm')[0];
-        if (xfrm) {
-            const rot = Number(xfrm.getAttribute('rot')) || 0;
-            // OOXML rotation is in 60,000ths of a degree, clockwise
-            rotation = rot / 60000;
-        }
-
-        const zIndex = Number(wrapper.getAttribute('relativeHeight')) || 0;
-
-        // Extract Position (Anchored)
-        const posH = byTag(wrapper, 'wp:positionH')[0];
-        if (posH) {
-            absPos.relH = posH.getAttribute('relativeFrom');
-            const align = byTag(posH, 'wp:align')[0]?.textContent;
-            if (align) {
-                absPos.alignH = align;
-                if (align === 'center') imageAlign = 'center';
-                else if (align === 'right') imageAlign = 'right';
-                else if (align === 'left') imageAlign = 'left';
-            }
-            const offset = byTag(posH, 'wp:posOffset')[0]?.textContent;
-            if (offset) absPos.x = Number(offset) / 9525;
-        }
-
-        const posV = byTag(wrapper, 'wp:positionV')[0];
-        if (posV) {
-            absPos.relV = posV.getAttribute('relativeFrom');
-            const align = byTag(posV, 'wp:align')[0]?.textContent;
-            if (align) absPos.alignV = align;
-            const offset = byTag(posV, 'wp:posOffset')[0]?.textContent;
-            if (offset) absPos.y = Number(offset) / 9525;
-        }
-
-        const targetPath = relationships[rEmbed];
-        if (!targetPath) return;
-        const base64Src = await getBase64Image(targetPath);
-        if (base64Src) {
-            outNodes.push({
-                type: 'image',
-                src: base64Src.src,
-                width,
-                height,
-                nativeWidth: base64Src.natW,
-                nativeHeight: base64Src.natH,
-                align: imageAlign,
-                absolutePos: Object.keys(absPos).length > 0 ? absPos : undefined,
-                wrapType,
-                rotation,
-                zIndex
-            });
-        }
-    };
-
     const processParagraphNode = async (p: Element, outNodes: DocumentNode[] = nodes) => {
         const pPr = extractParaProps(p);
         const align = pPr.align || 'left';
+
+        let sectionBreak: PageSettings | undefined = undefined;
+        const pPrNode = directByTag(p, 'w:pPr')[0];
+        if (pPrNode) {
+            const sectPrNode = directByTag(pPrNode, 'w:sectPr')[0];
+            if (sectPrNode) {
+                sectionBreak = extractPageSettings(sectPrNode);
+            }
+        }
 
         const runs = byTag(p, 'w:r');
         const textRuns: TextRun[] = [];
         const pendingImages: DocumentNode[] = [];
 
-        // Check if paragraph has its own default run properties
-        const pPrNode = byTag(p, 'w:pPr')[0];
         const pRPr = pPrNode ? extractRunProps(pPrNode) : {};
 
         for (let rIdx = 0; rIdx < runs.length; rIdx++) {
             const run = runs[rIdx];
             const runProps = extractRunProps(run);
-            // Merge paragraph run properties with specific run properties
             const props = { ...pRPr, ...runProps };
             const children = Array.from(run.children);
 
@@ -362,7 +413,7 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
                     textRuns.push({ text: '\n', isLineBreak: true, ...props });
                 } else if (localName === 'drawing') {
                     if (textRuns.length > 0) {
-                        outNodes.push({ type: 'paragraph', runs: [...textRuns], text: textRuns.map(r => r.text).join(''), align, pPr });
+                        outNodes.push({ type: 'paragraph', runs: [...textRuns], text: textRuns.map(r => r.text).join(''), align, pPr, sectPr: getCurrentSectionSettings() });
                         textRuns.length = 0;
                     }
                     const wrapper = byTag(child, 'wp:inline')[0] || byTag(child, 'wp:anchor')[0];
@@ -386,7 +437,7 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
                         const rId = iData.getAttribute('r:id');
                         if (rId && relationships[rId]) {
                             if (textRuns.length > 0) {
-                                outNodes.push({ type: 'paragraph', runs: [...textRuns], text: textRuns.map(r => r.text).join(''), align, pPr });
+                                outNodes.push({ type: 'paragraph', runs: [...textRuns], text: textRuns.map(r => r.text).join(''), align, pPr, sectPr: getCurrentSectionSettings() });
                                 textRuns.length = 0;
                             }
                             let w = 300, h = 300;
@@ -397,7 +448,7 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
                             if (hm) { h = parseFloat(hm[1]); if (hm[2] === 'pt') h *= 1.333; }
                             const base64Src = await getBase64Image(relationships[rId]);
                             if (base64Src) {
-                                pendingImages.push({ type: 'image', src: base64Src.src, width: w, height: h, nativeWidth: base64Src.natW, nativeHeight: base64Src.natH, align });
+                                pendingImages.push({ type: 'image', src: base64Src.src, width: w, height: h, nativeWidth: base64Src.natW, nativeHeight: base64Src.natH, align, sectPr: getCurrentSectionSettings() });
                             }
                         }
                     }
@@ -405,12 +456,17 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
             }
         }
 
-        outNodes.push({ type: 'paragraph', runs: [...textRuns], text: textRuns.map(r => r.text).join(''), align, pPr });
+        outNodes.push({ type: 'paragraph', runs: [...textRuns], text: textRuns.map(r => r.text).join(''), align, pPr, sectPr: getCurrentSectionSettings() });
         for (const img of pendingImages) outNodes.push(img);
+
+        // If this paragraph was a section break, all subsequent nodes belong to the NEXT section
+        if (sectionBreak) {
+            currentSectionIdx++;
+        }
     };
 
     const processTableNode = async (tbl: Element, outNodes: DocumentNode[] = nodes) => {
-        const rows: any[] = [];
+        const rows: TableRow[] = [];
         const grid: number[] = [];
 
         // Grid (Column widths)
@@ -469,7 +525,7 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
 
         const trNodes = directByTag(tbl, 'w:tr');
         for (const tr of trNodes) {
-            const cells: any[] = [];
+            const cells: TableCell[] = [];
             const tcNodes = directByTag(tr, 'w:tc');
             for (const tc of tcNodes) {
                 const cellNodes: DocumentNode[] = [];
@@ -537,15 +593,10 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
             rows,
             grid: grid.length > 0 ? grid : undefined,
             borders: Object.keys(tableBorders).length > 0 ? tableBorders : undefined,
-            widthValue: tableWidthVal
+            widthValue: tableWidthVal,
+            sectPr: getCurrentSectionSettings()
         });
     };
-
-    // Main parsing: Recursively walk the body to find paragraphs and tables
-    const body = byTag(xmlDoc, 'w:body')[0];
-    if (body) {
-        await walkBody(body, nodes);
-    }
 
     async function walkBody(container: Element, outNodes: DocumentNode[]) {
         const children = Array.from(container.children);
@@ -563,5 +614,10 @@ export async function parseDocxBuffer(arrayBuffer: ArrayBuffer): Promise<{ nodes
         }
     }
 
-    return { nodes, pageSettings, defaults };
+    // Main parsing
+    if (body) {
+        await walkBody(body, nodes);
+    }
+
+    return { nodes, pageSettings: defaultPageSettings, defaults };
 }

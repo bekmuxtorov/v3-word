@@ -12,11 +12,24 @@ export function buildLayoutTree(
     defaults: DocumentDefaults
 ): LayoutModel {
     const pages: PageLayout[] = [];
-    let currentPage: PageLayout = { width: pageSettings.width, height: pageSettings.height, items: [] };
+    /**
+     * Deep copy helper for PageSettings to avoid shared reference issues with margins
+     */
+    const copySettings = (s: PageSettings): PageSettings => ({
+        ...s,
+        margins: { ...s.margins }
+    });
+
+    const initialSettings = nodes[0]?.sectPr || pageSettings;
+    // Track the "base" settings of the current section to avoid margin corruption during table layout
+    let currentSectionBaseSettings = copySettings(initialSettings);
+    let currentSettings = copySettings(initialSettings);
+
+    let currentPage: PageLayout = { width: currentSettings.width, height: currentSettings.height, items: [] };
     pages.push(currentPage);
 
-    let currentX = pageSettings.margins.left;
-    let currentY = pageSettings.margins.top;
+    let currentX = currentSettings.margins.left;
+    let currentY = currentSettings.margins.top;
 
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d')!;
@@ -40,15 +53,22 @@ export function buildLayoutTree(
         return `${style} ${weight} ${sizePx}px "${family}"`;
     };
 
-    const newPage = () => {
-        currentPage = { width: pageSettings.width, height: pageSettings.height, items: [] };
+    const newPage = (newSettings?: PageSettings) => {
+        if (newSettings) {
+            currentSectionBaseSettings = copySettings(newSettings);
+            currentSettings = copySettings(newSettings);
+        } else {
+            // Restore from base to ensure clean margins on new pages
+            currentSettings = copySettings(currentSectionBaseSettings);
+        }
+        currentPage = { width: currentSettings.width, height: currentSettings.height, items: [] };
         pages.push(currentPage);
-        currentY = pageSettings.margins.top;
-        currentX = pageSettings.margins.left;
+        currentY = currentSettings.margins.top;
+        currentX = currentSettings.margins.left;
     };
 
     const checkPagination = (neededHeight: number) => {
-        if (currentY + neededHeight > pageSettings.height - pageSettings.margins.bottom) {
+        if (currentY + neededHeight > currentSettings.height - currentSettings.margins.bottom) {
             newPage();
         }
     };
@@ -58,13 +78,13 @@ export function buildLayoutTree(
             const nextCustom = customTabs.find(t => t.position > penX + 2);
             if (nextCustom) return nextCustom;
         }
-        const relXFromMargin = penX - pageSettings.margins.left;
+        const relXFromMargin = penX - currentSettings.margins.left;
         const next = Math.floor(relXFromMargin / DEFAULT_TAB_STOP_PX + 1) * DEFAULT_TAB_STOP_PX;
-        return { position: pageSettings.margins.left + next, type: 'left' };
+        return { position: currentSettings.margins.left + next, type: 'left' };
     };
 
     const processParagraph = (node: DocumentNode, isMeasuring: boolean = false, outItems?: any[]) => {
-        const currentContentWidth = pageSettings.width - pageSettings.margins.left - pageSettings.margins.right;
+        const currentContentWidth = currentSettings.width - currentSettings.margins.left - currentSettings.margins.right;
         const pPr = node.pPr || {};
         const align = pPr.align || 'left';
         const isInsideTable = outItems !== undefined;
@@ -87,7 +107,7 @@ export function buildLayoutTree(
             const emptyLinePx = calcLineHeight(defaults.fontSize || DEFAULT_FONT_SIZE_PT, lineSpacingMult);
             if (!isMeasuring) checkPagination(emptyLinePx);
             if (pPr.borderBottom) {
-                const item = { type: 'line', x: Math.round(pageSettings.margins.left), y: Math.round(currentY + emptyLinePx), width: currentContentWidth, lineWidth: pPr.borderBottom.size, color: pPr.borderBottom.color, lineStyle: pPr.borderBottom.style } as const;
+                const item = { type: 'line', x: Math.round(currentSettings.margins.left), y: Math.round(currentY + emptyLinePx), width: currentContentWidth, lineWidth: pPr.borderBottom.size, color: pPr.borderBottom.color, lineStyle: pPr.borderBottom.style } as const;
                 if (outItems) outItems.push(item);
                 else currentPage.items.push(item);
             }
@@ -107,7 +127,7 @@ export function buildLayoutTree(
         let lineChunks: LineChunk[] = [];
         let lineMaxH = (defaults.fontSize || DEFAULT_FONT_SIZE_PT) * PT_TO_PX;
         let isFirstLineOfPara = true;
-        let penX = pageSettings.margins.left + indentLeft + indentFirstLine;
+        let penX = currentSettings.margins.left + indentLeft + indentFirstLine;
         let hasTabInLine = false;
 
         const flushLine = (isLastLine: boolean = false) => {
@@ -164,7 +184,7 @@ export function buildLayoutTree(
 
             currentY += effectiveLineH;
             if (isLastLine && pPr.borderBottom) {
-                const item = { type: 'line', x: Math.round(pageSettings.margins.left), y: Math.round(currentY), width: currentContentWidth, lineWidth: pPr.borderBottom.size, color: pPr.borderBottom.color, lineStyle: pPr.borderBottom.style } as const;
+                const item = { type: 'line', x: Math.round(currentSettings.margins.left), y: Math.round(currentY), width: currentContentWidth, lineWidth: pPr.borderBottom.size, color: pPr.borderBottom.color, lineStyle: pPr.borderBottom.style } as const;
                 if (outItems) outItems.push(item);
                 else currentPage.items.push(item);
                 currentY += pPr.borderBottom.size + 1;
@@ -173,7 +193,7 @@ export function buildLayoutTree(
             lineChunks = [];
             lineMaxH = (defaults.fontSize || DEFAULT_FONT_SIZE_PT) * PT_TO_PX;
             isFirstLineOfPara = false;
-            penX = pageSettings.margins.left + indentLeft;
+            penX = currentSettings.margins.left + indentLeft;
             hasTabInLine = false;
         };
 
@@ -197,7 +217,7 @@ export function buildLayoutTree(
                 } else {
                     penX = tabStop.position;
                 }
-                if (penX >= pageSettings.width - pageSettings.margins.right) flushLine();
+                if (penX >= currentSettings.width - currentSettings.margins.right) flushLine();
                 continue;
             }
 
@@ -211,11 +231,11 @@ export function buildLayoutTree(
                 if (token === '') continue;
                 const w = measureText(token, fontCss);
                 // Wrap on non-whitespace tokens
-                if (penX + w > pageSettings.width - pageSettings.margins.right && lineChunks.length > 0 && token.trim() !== '') {
+                if (penX + w > currentSettings.width - currentSettings.margins.right && lineChunks.length > 0 && token.trim() !== '') {
                     flushLine();
                 }
                 // Skip leading spaces on wrapped lines
-                if (penX === pageSettings.margins.left + indentLeft && token.trim() === '' && !hasTabInLine) continue;
+                if (penX === currentSettings.margins.left + indentLeft && token.trim() === '' && !hasTabInLine) continue;
 
                 lineChunks.push({ text: token, run, fontCss, sizePx, width: w, x: penX });
                 penX += w;
@@ -229,7 +249,7 @@ export function buildLayoutTree(
 
     const processImage = (node: DocumentNode, isMeasuring: boolean = false, outItems?: any[]) => {
         if (!node.src) return;
-        const currentContentWidth = pageSettings.width - pageSettings.margins.left - pageSettings.margins.right;
+        const currentContentWidth = currentSettings.width - currentSettings.margins.left - currentSettings.margins.right;
         let w = node.width || node.nativeWidth || 300;
         let h = node.height || node.nativeHeight || 300;
         const align = node.align ?? 'left';
@@ -241,27 +261,27 @@ export function buildLayoutTree(
 
         if (node.absolutePos) {
             const { x: absX, y: absY, relH, relV, alignH, alignV } = node.absolutePos;
-            let finalX = pageSettings.margins.left;
+            let finalX = currentSettings.margins.left;
             let finalY = currentY;
 
             if (alignH === 'center') {
-                const baseW = (relH === 'page') ? pageSettings.width : currentContentWidth;
-                const startX = (relH === 'page') ? 0 : pageSettings.margins.left;
+                const baseW = (relH === 'page') ? currentSettings.width : currentContentWidth;
+                const startX = (relH === 'page') ? 0 : currentSettings.margins.left;
                 finalX = startX + (baseW - w) / 2;
             } else if (alignH === 'right') {
-                const startX = (relH === 'page') ? pageSettings.width : (pageSettings.margins.left + currentContentWidth);
+                const startX = (relH === 'page') ? currentSettings.width : (currentSettings.margins.left + currentContentWidth);
                 finalX = startX - w;
             } else if (absX !== undefined) {
-                const startX = (relH === 'page') ? 0 : pageSettings.margins.left;
+                const startX = (relH === 'page') ? 0 : currentSettings.margins.left;
                 finalX = startX + absX;
             }
 
             if (alignV === 'bottom') {
-                finalY = pageSettings.height - pageSettings.margins.bottom - h;
+                finalY = currentSettings.height - currentSettings.margins.bottom - h;
             } else if (alignV === 'center') {
-                finalY = (pageSettings.height - h) / 2;
+                finalY = (currentSettings.height - h) / 2;
             } else if (absY !== undefined) {
-                const startY = (relV === 'page') ? 0 : (relV === 'paragraph' ? currentY : pageSettings.margins.top);
+                const startY = (relV === 'page') ? 0 : (relV === 'paragraph' ? currentY : currentSettings.margins.top);
                 finalY = startY + absY;
             }
 
@@ -288,14 +308,14 @@ export function buildLayoutTree(
         }
 
         if (!isMeasuring) checkPagination(h + 20);
-        let x = pageSettings.margins.left;
+        let x = currentSettings.margins.left;
         if (w > currentContentWidth) {
             const ratio = currentContentWidth / w;
             w = currentContentWidth;
             h = h * ratio;
         }
-        if (align === 'center') x = pageSettings.margins.left + (currentContentWidth - w) / 2;
-        if (align === 'right') x = pageSettings.margins.left + currentContentWidth - w;
+        if (align === 'center') x = currentSettings.margins.left + (currentContentWidth - w) / 2;
+        if (align === 'right') x = currentSettings.margins.left + currentContentWidth - w;
 
         const item = {
             type: 'image',
@@ -316,7 +336,7 @@ export function buildLayoutTree(
     const processTable = (node: DocumentNode, isMeasuring: boolean = false, outItems?: any[]) => {
         if (!node.rows || node.rows.length === 0) return;
 
-        const currentContentWidth = pageSettings.width - pageSettings.margins.left - pageSettings.margins.right;
+        const currentContentWidth = currentSettings.width - currentSettings.margins.left - currentSettings.margins.right;
         let tableWidth = currentContentWidth;
         if (node.widthValue) {
             if (node.widthValue.type === 'dxa' || node.widthValue.type === 'auto') {
@@ -351,7 +371,7 @@ export function buildLayoutTree(
 
         for (const row of node.rows) {
             let maxRowH = 0;
-            let currentCellX = pageSettings.margins.left + tableXOffset;
+            let currentCellX = currentSettings.margins.left + tableXOffset;
             const startOfRowY = currentY;
 
             // First pass: measurement
@@ -366,14 +386,14 @@ export function buildLayoutTree(
 
                 const savedY = currentY;
                 const savedMargins = {
-                    left: pageSettings.margins.left,
-                    right: pageSettings.margins.right,
-                    top: pageSettings.margins.top,
-                    bottom: pageSettings.margins.bottom
+                    left: currentSettings.margins.left,
+                    right: currentSettings.margins.right,
+                    top: currentSettings.margins.top,
+                    bottom: currentSettings.margins.bottom
                 };
 
-                pageSettings.margins.left = currentCellX + 8;
-                pageSettings.margins.right = pageSettings.width - (currentCellX + cellW - 8);
+                currentSettings.margins.left = currentCellX + 8;
+                currentSettings.margins.right = currentSettings.width - (currentCellX + cellW - 8);
                 currentY = startOfRowY + 2;
 
                 const cellItems: any[] = [];
@@ -386,11 +406,11 @@ export function buildLayoutTree(
                 const cellH = currentY - startOfRowY;
                 if (cellH > maxRowH) maxRowH = cellH;
 
-                rowCellLayouts.push({ cell, items: cellItems, height: cellH, x: currentCellX, width: cellW });
+                rowCellLayouts.push({ cell: cell, items: cellItems, height: cellH, x: currentCellX, width: cellW });
 
                 currentY = savedY;
-                pageSettings.margins.left = savedMargins.left;
-                pageSettings.margins.right = savedMargins.right;
+                currentSettings.margins.left = savedMargins.left;
+                currentSettings.margins.right = savedMargins.right;
 
                 currentCellX += cellW;
                 colIdx += span;
@@ -448,6 +468,22 @@ export function buildLayoutTree(
     };
 
     for (const node of nodes) {
+        if (node.sectPr) {
+            const nodeSettings = node.sectPr;
+            // Compare by dimensions and margins to avoid unnecessary new pages
+            const isDifferent = 
+                Math.abs(nodeSettings.width - currentSettings.width) > 0.1 ||
+                Math.abs(nodeSettings.height - currentSettings.height) > 0.1 ||
+                Math.abs(nodeSettings.margins.top - currentSettings.margins.top) > 0.1 ||
+                Math.abs(nodeSettings.margins.bottom - currentSettings.margins.bottom) > 0.1 ||
+                Math.abs(nodeSettings.margins.left - currentSettings.margins.left) > 0.1 ||
+                Math.abs(nodeSettings.margins.right - currentSettings.margins.right) > 0.1;
+
+            if (isDifferent) {
+                console.log(`[LayoutEngine] Section change detected. New dimensions: ${nodeSettings.width}x${nodeSettings.height}`);
+                newPage(nodeSettings);
+            }
+        }
         if (node.type === 'paragraph') processParagraph(node);
         else if (node.type === 'image') processImage(node);
         else if (node.type === 'table') processTable(node);
@@ -456,8 +492,8 @@ export function buildLayoutTree(
     // Sort items by zIndex to ensure correct layering
     for (const page of pages) {
         page.items.sort((a, b) => {
-            const zA = (a.type === 'image' ? a.zIndex : 0) || 0;
-            const zB = (b.type === 'image' ? b.zIndex : 0) || 0;
+            const zA = (a.type === 'image' ? (a as any).zIndex : 0) || 0;
+            const zB = (b.type === 'image' ? (b as any).zIndex : 0) || 0;
             return zA - zB;
         });
     }

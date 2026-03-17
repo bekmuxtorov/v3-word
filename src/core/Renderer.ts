@@ -35,31 +35,34 @@ export class CanvasRenderer {
         const strokeColor = color ? `#${color}` : '#000000';
         this.ctx.strokeStyle = strokeColor;
 
+        // Use precise integer coordinates to avoid blur
+        const rx = Math.round(x);
+        const ry = Math.round(y);
+
         if (lineStyle === 'double' && width !== undefined) {
-            // Ultra-precise double lines
-            const thinW = Math.max(0.4, lineWidth * 0.3);
-            const gap = Math.max(0.6, lineWidth * 0.35);
+            const thinW = Math.max(0.5, lineWidth * 0.3);
+            const gap = Math.max(0.5, lineWidth * 0.35);
 
             this.ctx.lineWidth = thinW;
+            const rw = Math.round(width);
 
-            // Draw relative to Y-center
             this.ctx.beginPath();
-            this.ctx.moveTo(x, y - gap);
-            this.ctx.lineTo(x + width, y - gap);
+            this.ctx.moveTo(rx, ry - gap);
+            this.ctx.lineTo(rx + rw, ry - gap);
             this.ctx.stroke();
 
             this.ctx.beginPath();
-            this.ctx.moveTo(x, y + gap);
-            this.ctx.lineTo(x + width, y + gap);
+            this.ctx.moveTo(rx, ry + gap);
+            this.ctx.lineTo(rx + rw, ry + gap);
             this.ctx.stroke();
         } else {
             this.ctx.lineWidth = lineWidth;
             this.ctx.beginPath();
-            this.ctx.moveTo(x, y);
+            this.ctx.moveTo(rx, ry);
             if (width !== undefined) {
-                this.ctx.lineTo(x + width, y);
+                this.ctx.lineTo(rx + Math.round(width), ry);
             } else if (height !== undefined) {
-                this.ctx.lineTo(x, y + height);
+                this.ctx.lineTo(rx, ry + Math.round(height));
             }
             this.ctx.stroke();
         }
@@ -75,10 +78,10 @@ export class CanvasRenderer {
         const fillColor = color ? `#${color}` : '#000000';
         this.ctx.fillStyle = fillColor;
 
-        // Baseline calibration: using font-size offset is standard, 
-        // but for True Parity we add a tiny sub-pixel nudge
-        const baseline = y + fontSize * 0.88; // Slightly higher for descender space
-        this.ctx.fillText(text, x, baseline);
+        // Round coordinates to prevent sub-pixel blurring
+        const rx = Math.round(x);
+        const baseline = Math.round(y + fontSize * 0.88);
+        this.ctx.fillText(text, rx, baseline);
 
         if (underline) {
             const lineY = baseline + 1.5;
@@ -137,11 +140,15 @@ export class CanvasRenderer {
 
     public static setupHiDPICanvas(canvas: HTMLCanvasElement, width: number, height: number, ratio?: number) {
         const pixelRatio = ratio || window.devicePixelRatio || 1;
-        canvas.width = width * pixelRatio;
-        canvas.height = height * pixelRatio;
+        canvas.width = Math.round(width * pixelRatio);
+        canvas.height = Math.round(height * pixelRatio);
         canvas.style.width = width + 'px';
         canvas.style.height = height + 'px';
         const ctx = canvas.getContext('2d');
-        if (ctx) ctx.scale(pixelRatio, pixelRatio);
+        if (ctx) {
+            ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+            ctx.imageSmoothingEnabled = true;
+            (ctx as any).imageSmoothingQuality = 'high';
+        }
     }
 }
